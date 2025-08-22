@@ -1,0 +1,204 @@
+%% ------------------------------------------------------------------------
+%
+%
+%   Short Descirption:  Calculate an inner-estimate of the
+%                       region-of-attraction for the longitudinal motion 
+%                       of the Nasa Generic Transport Model. To increase
+%                       the size of the sublevel set we try to minimize the
+%                       squared distance to a defined set. Additionally, we
+%                       synthesis a linear control law at the same time.
+%                       State and control constraints are considered.
+%
+%   Reference: Modified problem from:
+%              Chakraborty, Abhijit and Seiler, Peter and Balas, Gary J.,
+%              Nonlinear region of attraction analysis for flight control 
+%              verification and validation, Control Engineering Practice,
+%              2011, doi: 10.1016/j.conengprac.2010.12.001
+%           
+%
+%--------------------------------------------------------------------------
+
+import casos.toolboxes.sosopt.cleanpoly
+
+% system states
+x = casos.PS('x',6,1);
+u = casos.PS('u',3,1);
+
+%% Hubble telescope parameter
+J = diag([3104;7721;7875]);
+
+% simple bounds on rates;
+omegaMax1 = 0.5*pi/180;
+omegaMax2 = 0.2*pi/180;
+omegaMax3 = 0.2*pi/180;
+
+x_low =  [-omegaMax1 -omegaMax2 -omegaMax3]';
+x_up  =  [ omegaMax1  omegaMax2  omegaMax3]';
+
+
+% control constraint; assumption is that the box is inside the full
+% torque volume. This is roughly estimated visually.
+umin = [-1 -1 -1]'*1.2;
+umax = [ 1  1  1]'*1.2;
+
+Dx   = diag([1/(x_up(1)-x_low(1)),1/(x_up(2)-x_low(2)),1/(x_up(3)-x_low(3)),0.5,0.5,0.5]);
+
+Dxin = inv(Dx);
+
+%% dynamics
+% skew-symmetric matrix
+cpm = @(x) [   0  -x(3)  x(2); 
+              x(3)   0   -x(1); 
+             -x(2)  x(1)   0 ];
+
+% dynamics
+B = @(sigma) (1-sigma'*sigma)*eye(3)+ 2*cpm(sigma)+ 2*sigma*sigma';
+
+f =  [-J\cpm(x(1:3))*J*x(1:3) + J\u;
+      1/4*B(x(4:6))*x(1:3)]; 
+
+% generate an initial guess for CLF
+x0    = [0 0 0 0 0 0]';
+u0    = [0,0,0]';
+
+A = full(casos.PD(subs(nabla(f,x),[x;u],[x0;u0])));
+B = full(casos.PD(subs(nabla(f,u),[x;u],[x0;u0])));
+
+Q = diag([1, 1, 1, 1,1 ,1]);
+R = eye(3)*1;
+[~,P0] = lqr(full(A),full(B),Q,R);
+
+% scaled initial guess for terminal penalty (Lyapunov linear system)
+Wval = (inv(Dx)*x)'*P0*(inv(Dx)*x);
+
+% scale dynamics
+f = Dx*subs(f,[x;u],[Dx\x;u]);
+
+% allowable set (inner-approximation of box constraints via superquadric)
+% n = 2;
+% g0 = (x(1)^2/omegaMax1^2)^(n/2) + (x(2)^2/omegaMax2^2)^(n/2) + (x(3)^2/omegaMax3^2)^(n/2) + ...
+     % (x(4)^2/0.57^2)^(n/2) + (x(5)^2/0.57^2)^(n/2) + (x(6)^2/0.57^2)^(n/2) - 1;
+
+
+
+g1 = -(x(1)-(-omegaMax1))*(omegaMax1-x(1));
+g2 = -(x(2)-(-omegaMax2))*(omegaMax2-x(2));
+g3 = -(x(3)-(-omegaMax3))*(omegaMax3-x(3));
+g4 = -(x(4)-(-0.57))*(0.57-x(4));
+g5 = -(x(5)-(-0.57))*(0.57-x(5));
+g6 = -(x(6)-(-0.57))*(0.57-x(6));
+
+g0 = [g1;g2;g3;g4;g5;g6];
+
+% re-scale input of state constraints
+g = subs(g0,x,Dx\x); 
+
+
+% allowable set (inner-approximation of box constraints via superquadric)
+n = 4;
+g0_c = (x(1)^2/omegaMax1^2)^(n/2) + (x(2)^2/omegaMax2^2)^(n/2) + (x(3)^2/omegaMax3^2)^(n/2) + ...
+     (x(4)^2/0.57^2)^(n/2) + (x(5)^2/0.57^2)^(n/2) + (x(6)^2/0.57^2)^(n/2) - 1;
+
+% re-scale input of state constraints
+g_c = subs(g0_c,x,Dx\x); 
+
+% Lyapunov function candidate
+V = casos.PS.sym('v',monomials(x,2:4));
+
+% SOS multiplier
+s1    = casos.PS.sym('s1',monomials(x,2));
+s2    = casos.PS.sym('s2',monomials(x,0),[3 1]);
+s3    = casos.PS.sym('s3',monomials(x,0),[3 1]);
+s4    = casos.PS.sym('s4',monomials(x,0:2),[length(g) 1]);
+
+% control law(s)
+K1  = casos.PS.sym('k1',monomials(x,0),[3 1]);
+for j = 1:3
+ K1(j) = casos.PS.sym('k2',monomials([x(j)]));
+end
+
+K2  = casos.PS.sym('k',monomials(x,0),[3 1]);
+for j = 1:3
+ K2(j) = casos.PS.sym('k',monomials([x(j+3)]));
+end
+
+kappa = K1+K2;
+
+
+b     = casos.PS.sym('b');
+
+% enforce positivity
+l = 1e-6*(x'*x);
+
+
+%% setup solver
+% options
+opts = struct('sossol','mosek');
+opts.verbose  = 1;
+opts.max_iter = 100;
+
+% cost
+cost = dot(g_c-(V-b),g_c-(V-b))  ;
+
+sos = struct('x',[V; s1;s2;s3;s4;K1;K2;b],... % decision variables
+              'f',cost, ...                   % cost
+              'p',[]);                        % parameter
+
+% SOS constraints
+sos.('g') = [s1;
+             s2;
+             s3;
+             s4;
+             V-l; 
+             s1*(V-b)-nabla(V,x)*subs(f,u,kappa)-l;
+             s2*(V-b) + kappa - umin;
+             s3*(V-b) + umax- kappa;
+             s4*(V-b) - g
+             ];
+
+% states + constraint cones
+opts.Kx      = struct('lin', length(sos.x));
+opts.Kc      = struct('sos', length(sos.g));
+
+% setup solver
+S = casos.nlsossol('S1','filter-linesearch',sos,opts);
+
+%% solve problem
+
+% initial guess
+% initial guess
+V0 = g_c;
+s10 = x'*x;
+s20 = [1;1;1];
+s30 = [1;1;1];
+s40 = (x'*x)*ones(length(g),1) ;
+
+K1_0  = [1*x(1);1*x(2);1*x(3)];
+K2_0  = [1*x(4);1*x(5);1*x(6)];
+b0  = 1;
+
+x0 = casos.PD([V0;s10;s20;s30;s40;K1_0;K2_0;b0]);
+
+% solve problem
+sol = S('x0' ,x0);
+
+casos.postProcessSolver(S,true);
+
+S.stats
+
+S.stats.single_iterations{end}.conic
+
+%% plotting
+figure
+
+% re-scale solution
+xd = Dx*x;
+
+Vfun = to_function(subs(sol.x(1),x,xd));
+gfun = to_function(subs(g_c,x,xd));
+
+fcontour(@(x4,x5) full(Vfun(0,0,0, x4,x5,0) ), [-1 1 -4 4 ], 'b-', 'LevelList', full(sol.x(end)))
+hold on
+fcontour(@(x4,x5)  full(gfun(0,0,0, x4,x5,0) ), [-1 1 -4 4 ], 'r-', 'LevelList', 0)
+hold off
+legend('Lyapunov function','Safe set function')
