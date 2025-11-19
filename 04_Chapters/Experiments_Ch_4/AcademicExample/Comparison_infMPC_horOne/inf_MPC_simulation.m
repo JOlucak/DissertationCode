@@ -37,22 +37,19 @@
 %
 %
 % ------------------------------------------------------------------------
-
+function [iter_all,x_sol_all ,u_sol_all, tEnd_all,suffCon_all] = inf_MPC_simulation(X0)
 import casadi.*
 
-clear
 clear textprogressbar  % to clear persistent variables
-close all
-clc
 
 % functions to convert e.g. from MRP to Euler angles
-addpath('..\helperFunc\')
+%addpath('..\helperFunc\')
 
 % select a QP solver
 qpSolver = 'qrqp'; % 'qpOASES','osqp','proxqp', 'qrqp'
 
 
-SimulationType = 'Comparison'; % 'MC': Monte-carlo with uniform distribution
+SimulationType = 'Single'; % 'MC': Monte-carlo with uniform distribution
                                % 'Comparison': Several Pre-selected inital conditions
                                % 'Single': Single run
 
@@ -60,8 +57,8 @@ SimulationType = 'Comparison'; % 'MC': Monte-carlo with uniform distribution
 load terminalIngredients.mat
 
 %% Setup satellite parameter and dynamics
-x  = SX.sym('x',6,1);
-u  = SX.sym('u',3,1);
+x  = SX.sym('x',2,1);
+u  = SX.sym('u',1,1);
 p  = SX.sym('p',length(x),1);
 
 Nx = length(x);
@@ -69,23 +66,15 @@ Nu = length(u);
 
 % ODE solve/simulation
 dt0         = 0.1;
-simTime     = 5000; % maxTime allowed for simulation
+simTime     = 50; % maxTime allowed for simulation
 simStepSize = dt0;
 
-% satellite dynamics (rates and MRP kinematics) 
-% (Intertia tensor J read in above from terminalIngredients.mat)
-
-% cross-product matrix
-cpm = @(x) [   0   -x(3)  x(2);
-              x(3)   0   -x(1);
-             -x(2)  x(1)    0 ];
-
-% MRP dynamics
-B = @(sigma) (1-sigma'*sigma)*eye(3)+ 2*cpm(sigma)+ 2*sigma*sigma';
+% dynamics
+mu =1;
 
 % dynamics
-xdot =  [-J\cpm(x(1:3))*J*x(1:3) + J\u;
-         1/4*B(x(4:6))*x(1:3)];
+xdot = [x(2);
+      mu*(1-x(1)^2)*x(2) - x(1) - u];
 
 
 % torque bounds (read in above from terminalIngredients.mat) 
@@ -98,17 +87,14 @@ u_up  = umax;
 
 x_1 = x(1);
 x_2 = x(2);
-x_3 = x(3);
-x_4 = x(4);
-x_5 = x(5);
-x_6 = x(6);
+
 
 % pre-computed CBF and CLF and their derivatives
-W =    W_fun(x_1, x_2, x_3, x_4, x_5, x_6);
-V =    V_fun(x_1, x_2, x_3, x_4, x_5, x_6);
+W =    W_fun(x_1, x_2);
+V =    V_fun(x_1, x_2);
 
-% derivative continous-time CBF constraint; gamma = 0.0001
-Wfun_c = Function('f',{x,u},{jacobian(W,x)*xdot + 0.0001*W});   
+% derivative continous-time CBF constraint
+Wfun_c = Function('f',{x,u},{jacobian(W,x)*xdot + 0.001*W});   
 
 % terminal set just to check if we are in the terminal set
 Wfun = Function('f',{x},{W});   
@@ -261,8 +247,8 @@ mex("sim_mex.c")
 if strcmp(SimulationType,'MC')
     
     % get 100 initial attitude; rates set to zero because rest-to-rest
-    a4 = -0.55;  b4 = 0.55;
-    x0_low(4:6,:) = (b4-a4)*rand(3,100)+a4;
+    a4 = -1;  b4 = 1;
+    x0_low = (b4-a4)*rand(2,1000)+a4;
     
     % we only consider initial states that lie in the terminal set
     idx = full(Wfun(x0_low)) <= 0;
@@ -288,22 +274,13 @@ elseif strcmp(SimulationType,'Comparison')
         x0_low(4:6,j)  = Euler1232MRP([phi0(j),theta0,psi0]);
      end
 
-     % .mat file name
-     matFileName = 'infiniteMPC_comparison_3_runs.mat';
 
 else
     % single run
-    numRuns  = 1;      
+    numRuns  = size(X0,2);      
 
-     % just a single fixed initial attitude
-     phi0   = 110*pi/180;
-     theta0 = 0;
-     psi0   = 0;
-    
-     x0_low(4:6,1)  = Euler1232MRP([phi0,theta0,psi0]);
-
-     % .mat file name
-     matFileName = 'infiniteMPC_comparison.mat';
+    % reduce to feasible initial conditions
+    x0_low = X0;
 
 end
 
@@ -314,6 +291,7 @@ startSim = tic;
 x_sol_all   = cell(numRuns, 1);
 u_sol_all   = cell(numRuns, 1);
 tEnd_all    = nan(numRuns, simTime/simStepSize - 1);
+optIter     = nan(numRuns, simTime/simStepSize - 1);
 suffCon_all = nan(numRuns, simTime/simStepSize - 1);
 iter_all    = cell(numRuns, 1);
 Barrier_all = nan(numRuns, simTime/simStepSize);
@@ -327,24 +305,20 @@ for j = 1:numRuns
     x0 = x0_low(:,j); 
     
     % pre-allocated arrays for j-th run
-    x_sol_vec_infMPC = zeros(6, simTime/simStepSize);
-    u_sol_vec_infMPC = zeros(3, simTime/simStepSize - 1);
+    x_sol_vec_infMPC = zeros(Nx, simTime/simStepSize);
+    u_sol_vec_infMPC = zeros(Nu, simTime/simStepSize - 1);
     suffCon          = nan(simTime/simStepSize - 1,1);
     Barrier          = nan(simTime/simStepSize,1);
-
+    
 
     % set initial conditions  
     x_sim                  = x0;
     x_sol_vec_infMPC(:,1)  = x0;
 
-    % MRP to Euler anlges
-    [phi,theta,psi]         =  mrp2eul(x0(4:6));
-    x_sol_vec_infMPC(4:6,1) = [phi,theta,psi]'*180/pi;
-
     % first initial guess for decision variables
     z0 = zeros(Nu,1); % could be more sophisticated, but totally fine
 
-    textprogressbar('Simulation for horizon-one MPC:');
+    textprogressbar('Simulation for inf. MPC:');
     
     Barrier(1) =     full(Wfun( x_sim(:,1)));
 
@@ -355,7 +329,8 @@ for j = 1:numRuns
         
         % Get wall time in seconds
         tEnd_all(j, k-1) = solver.stats.t_wall_total;
-        
+        optIter(j,k-1)  = solver.stats.iter_count;
+
         % Extract solution
         u_sol = full(sol.x);
 
@@ -368,22 +343,14 @@ for j = 1:numRuns
         % store solution for later plotting
         x_sol_vec_infMPC(:,k)  = x_sim(:,k);
         
-        % store Euler Angles in degree for plotting and convergence check
-        [phi,theta,psi]  =  mrp2eul(x_sim(4:6,k));
-       
-        % store Eule-angles in degree
-        x_sol_vec_infMPC(4:6,k) = [phi,theta,psi]'*180/pi;
-        
+
         % Store sufficient condition i.e. cost of QP
         suffCon(k-1) = full(sol.f);
        
         Barrier(k) =     full(Wfun( x_sim(:,k)));
 
-        % check convergence 
-        if norm(x_sol_vec_infMPC(1:3,k),inf)*180/pi < 1e-3 && ... % below 0.001 deg/s
-           norm(x_sol_vec_infMPC(4:6,k),inf) < 0.3 &&...          % below 0.3 deg
-           norm(u_sol,inf) < 1e-3                                 % below 1 Nm
-
+        % % check convergence 
+        if norm(x_sol_vec_infMPC(:,k),inf)< 1e-4       &&   norm(u_sol_vec_infMPC(:,k-1),inf) < 1e-4 
            break
         end
 
@@ -434,153 +401,103 @@ maxSuffCond = max(suffCon_all, [], 'all');
 
 % this value should be <= 0 
 fprintf('Maximum value of sufficient condition: %f\n', maxSuffCond);
-
-%% Plotting
 t      = linspace(0, simTime, simTime/simStepSize);
-colors = lines(numRuns); % Get a colormap for different runs
-
-% re-scale rate constraints (real physical constraints) to deg/s
-x_low =  [-omegaMax1*180/pi -omegaMax2*180/pi -omegaMax3*180/pi]';
-x_up  =  [ omegaMax1*180/pi  omegaMax2*180/pi  omegaMax3*180/pi]';
-
-% Plot Rates in Degree/second
-figure('Name', 'Rates');
-for i = 1:3
-    subplot(3,1,i);
-    hold on;
-    for j = 1:numRuns
-        plot(t(1:iter_all{j}), x_sol_all{j}(i,1:iter_all{j}) * 180/pi, 'Color', colors(j, :));
-    end
-    xlabel('t [s]');
-    ylabel(sprintf('\\omega_%c [°/s]', 'x' + (i-1)));
-    grid on;
-
-    % plot gray shadded area and dashed gray lines
-    xLimits = [0, t(max([iter_all{:}])) ]; 
-    yDashed = x_low(i); 
-    plot([0 t(max([iter_all{:}]))],[yDashed yDashed],'--','Color',[0.5 0.5 0.5])
-    miny =  x_low(i)+0.5* x_low(i);
-    fill([xLimits(1) xLimits(2) xLimits(2) xLimits(1)], [miny miny yDashed yDashed], [0.7 0.7 0.7],'FaceAlpha',0.4 ,'EdgeColor', 'none');
-
-    xLimits = [0, t(max([iter_all{:}]))]; 
-    yDashed =  x_up(i);
-    plot([0 t(max([iter_all{:}]))],[yDashed yDashed],'--','Color',[0.5 0.5 0.5])
-    maxy = x_up(i)+0.5*x_up(i);
-    fill([xLimits(1) xLimits(2) xLimits(2) xLimits(1)], [yDashed yDashed maxy maxy], [0.7 0.7 0.7],'FaceAlpha',0.4 ,'EdgeColor', 'none');
-    axis([0 t(max([iter_all{:}])) miny maxy])
-end
-
-% Plot Attitude in Euler-Angles in degree
-figure('Name', 'Attitude');
-Euler_names = {'\phi','\theta','\psi'};
-for i = 4:6
-    subplot(3,1,i-3);
-    hold on;
-    for j = 1:numRuns
-        plot(t(1:iter_all{j}), x_sol_all{j}(i,1:iter_all{j}), 'Color', colors(j, :));
-    end
-    % axis([0 t(max([iter_all{:}])) -180 180])
-    xlabel('t [s]');
-    ylabel([Euler_names{i-3} ' [deg]']);
-    grid on;
-end
-
-
-% Plot Control Torques in miliNetwonmeter
-t_short = linspace(0, simTime, (simTime/simStepSize)-1);
-
-% set up with torques in mili-Newtonmeter
-ulow = u_low'*1000;
-uup  = u_up'*1000;
-
-figure('Name', 'Control Torques')
-for i = 1:3
-    subplot(3,1,i);
-    hold on;
-    for j = 1:numRuns
-        % stored control torques also in mili-Newtonmeter
-        plot(t(1:iter_all{j}-1), u_sol_all{j}(i,(1:iter_all{j}-1)) * 1000, 'Color', colors(j, :));
-    end
-    xlabel('t [s]');
-    ylabel(sprintf('\\tau_%c [mNm]', 'x' + (i-1)));
-    grid on;
-
-    % plot gray shadded area and dashed gray line
-    xLimits = [0, t(max(iter_all{j}))]; 
-    yDashed = ulow(i); 
-    miny =  ulow(i)+0.5* ulow(i);
-    plot([0 t(max(iter_all{j}))],[yDashed yDashed],'--','Color',[0.5 0.5 0.5])
-    fill([xLimits(1) xLimits(2) xLimits(2) xLimits(1)], [miny miny yDashed yDashed], [0.7 0.7 0.7],'FaceAlpha',0.4 ,'EdgeColor', 'none');
-
-    xLimits = [0, t(max(iter_all{j}))]; 
-    yDashed =  uup(i); 
-    plot([0 t(max(iter_all{j}))],[yDashed yDashed],'--','Color',[0.5 0.5 0.5]) 
-    maxy = uup(i)+0.5*uup(i);
-    fill([xLimits(1) xLimits(2) xLimits(2) xLimits(1)], [yDashed yDashed maxy maxy], [0.7 0.7 0.7],'FaceAlpha',0.4 ,'EdgeColor', 'none');
-    axis([0 t(max(iter_all{j})) miny maxy])
 
 end
-
-% Plot Sufficient Conditions evaluted along trajectories
-figure('Name', 'Sufficient Conditions');
-plot([0 t(max(iter_all{j}))], [0 0.0], 'k--');
-axis([0 t(max(iter_all{j})) minSuffCond 0.1])
-hold on;
-for j = 1:numRuns
-    plot(t(1:iter_all{j}-1), suffCon_all(j,(1:iter_all{j}-1)), 'Color',colors(j, :));
-end
-xlabel('t [s]');
-ylabel('\nabla_x F \cdot f(x,u)');
-
-
-
-% Plot barrier evaluted along trajectories; should be B(x(t)) <= 0
-figure('Name', 'Barrier');
-plot([0 t(max(iter_all{j}))], [0 0.0], 'k--');
-hold on;
-for j = 1:numRuns
-       plot(t(1:iter_all{j}), Barrier_all(j,(1:iter_all{j})), 'Color',colors(j, :));
-end
-xlabel('t [s]');
-ylabel('W(x)');
-
-
-% Plot Solve Time
-figure('Name', 'Solve Time');
-
-for j = 1:numRuns
-    semilogy(t_short(1:iter_all{j}-1), tEnd_all(j,(1:iter_all{j}-1)), 'Color', colors(j, :));
-    hold on;
-end
-xlabel('Simulation time [s]');
-ylabel('Computation time [s]');
-axis([0 t(max(iter_all{j})) 1e-6 1])
-grid on;
-
-%% store data for comparison
-% to distinguihs it from other approaches
-Q_infinite    = Q;
-R_infinite    = R;
-iter_conv_inf = iter_all;
-tEnd_all_inf  = tEnd_all;
-Barrier_inf   = Barrier_all;
-suffCon_inf   = suffCon_all;
-
-x_sol_vec_infMPC = x_sol_all;
-u_sol_vec_infMPC = u_sol_all ;
-
-Omega_bounds  = [omegaMax1;omegaMax2;omegaMax3];
-
-cd ../
-% store in main folder for comparison
-save(matFileName,...
-    'Q_infinite','R_infinite',...
-    'x_sol_vec_infMPC','u_sol_vec_infMPC',...
-    'u_low','u_up','Omega_bounds',...
-    "simTime","simStepSize","iter_conv_inf","maxSolveTime_infMPC",'tEnd_all_inf','meanSolveTime_infMPC',...
-    'Barrier_inf','suffCon_inf')
-
-cd ./inf_MPC/
-
-% remove helper functions from path
-rmpath('..\helperFunc\')
+%% Plotting
+% 
+% colors = lines(numRuns); % Get a colormap for different runs
+% 
+% % Plot Rates in Degree/second
+% figure('Name', 'Rates');
+% for i = 1:2
+%     subplot(3,1,i);
+%     hold on;
+%     for j = 1:numRuns
+%         plot(t(1:iter_all{j}), x_sol_all{j}(i,1:iter_all{j}), 'Color', colors(j, :));
+%     end
+%     xlabel('t [s]');
+%     % ylabel(sprintf('\\omega_%c [°/s]', 'x' + (i-1)));
+%     grid on;
+% 
+% end
+% 
+% 
+% % Plot Control Torques in miliNetwonmeter
+% t_short = linspace(0, simTime, (simTime/simStepSize)-1);
+% 
+% % set up with torques in mili-Newtonmeter
+% ulow = u_low';
+% uup  = u_up';
+% 
+% figure('Name', 'Control Torques')
+% for i = 1
+%     subplot(3,1,i);
+%     hold on;
+%     for j = 1:numRuns
+%         % stored control torques also in mili-Newtonmeter
+%         plot(t(1:iter_all{j}-1), u_sol_all{j}(i,(1:iter_all{j}-1)), 'Color', colors(j, :));
+%     end
+%     xlabel('t [s]');
+%     ylabel(sprintf('\\tau_%c [mNm]', 'x' + (i-1)));
+%     grid on;
+% 
+%     % plot gray shadded area and dashed gray line
+%     xLimits = [0, t(max(iter_all{j}))]; 
+%     yDashed = ulow(i); 
+%     miny =  ulow(i)+0.5* ulow(i);
+%     plot([0 t(max(iter_all{j}))],[yDashed yDashed],'--','Color',[0.5 0.5 0.5])
+%     fill([xLimits(1) xLimits(2) xLimits(2) xLimits(1)], [miny miny yDashed yDashed], [0.7 0.7 0.7],'FaceAlpha',0.4 ,'EdgeColor', 'none');
+% 
+%     xLimits = [0, t(max(iter_all{j}))]; 
+%     yDashed =  uup(i); 
+%     plot([0 t(max(iter_all{j}))],[yDashed yDashed],'--','Color',[0.5 0.5 0.5]) 
+%     maxy = uup(i)+0.5*uup(i);
+%     fill([xLimits(1) xLimits(2) xLimits(2) xLimits(1)], [yDashed yDashed maxy maxy], [0.7 0.7 0.7],'FaceAlpha',0.4 ,'EdgeColor', 'none');
+%     axis([0 t(max(iter_all{j})) miny maxy])
+% 
+% end
+% 
+% % Plot Sufficient Conditions evaluted along trajectories
+% figure('Name', 'Sufficient Conditions');
+% plot([0 t(max(iter_all{j}))], [0 0.0], 'k--');
+% axis([0 t(max(iter_all{j})) minSuffCond 0.1])
+% hold on;
+% for j = 1:numRuns
+%     plot(t(1:iter_all{j}-1), suffCon_all(j,(1:iter_all{j}-1)), 'Color',colors(j, :));
+% end
+% xlabel('t [s]');
+% ylabel('\nabla_x F \cdot f(x,u)');
+% 
+% 
+% 
+% % Plot barrier evaluted along trajectories; should be B(x(t)) <= 0
+% figure('Name', 'Barrier');
+% plot([0 t(max(iter_all{j}))], [0 0.0], 'k--');
+% hold on;
+% for j = 1:numRuns
+%        plot(t(1:iter_all{j}), Barrier_all(j,(1:iter_all{j})), 'Color',colors(j, :));
+% end
+% xlabel('t [s]');
+% ylabel('W(x)');
+% 
+% 
+% % Plot Solve Time
+% figure('Name', 'Solve Time');
+% 
+% for j = 1:numRuns
+%     semilogy(t_short(1:iter_all{j}-1), tEnd_all(j,(1:iter_all{j}-1)), 'Color', colors(j, :));
+%     hold on;
+% end
+% xlabel('Simulation time [s]');
+% ylabel('Computation time [s]');
+% axis([0 t(max(iter_all{j})) 1e-6 1])
+% grid on;
+% 
+% 
+% % get iterations
+% figure('Name','Solver Iterations')
+% for j = 1:numRuns
+%     plot(t_short(1:iter_all{j}-1), mean(optIter(j,(1:iter_all{j}-1))), 'Color', colors(j, :));
+%     hold on;
+% end
