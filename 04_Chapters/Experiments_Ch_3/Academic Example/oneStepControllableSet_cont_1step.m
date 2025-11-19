@@ -25,7 +25,7 @@ P = [6.4314    0.4580
 
 % actual terminal set; not needed
 l = x'*P*x-1;            
-lT = l;
+
 % for simplicity assume this is the safe set!
 g = 3*x(2)^2 + x(1)^2 -1;  % g(x) \leq 0
 
@@ -116,39 +116,21 @@ buildTime_in = tic;
     solver_oneStepReach  = casos.nlsossol('S','sequential',sos,opts);
 buildtime = toc(buildTime_in);
 
+sol = solver_oneStepReach('x0',casos.PD([ Vval;  ...
+                                          x'*x; ...
+                                          x'*x; ...
+                                          x'*x; ...
+                                          x'*x;
+                                          x'*x;
+                                          x'*x;
+                                          x'*x;
+                                          x'*x;
+                                          x'*x;
+                                          x'*x;
+                                          x'*x;
+                                          x'*x]), ...
+                                          'p',casos.PD(l)); 
 
-timeHor = 5;
-N = timeHor/T;
-
-startTic = tic;
-for k = 1:N
-
-if k == 1   
-    sol = solver_oneStepReach('x0',casos.PD([ Vval;  ...
-                                              x'*x; ...
-                                              x'*x; ...
-                                              x'*x; ...
-                                              x'*x;
-                                              x'*x;
-                                              x'*x;
-                                              x'*x;
-                                              x'*x;
-                                              x'*x;
-                                              x'*x;
-                                              x'*x;
-                                              x'*x]), ...
-                                              'p',casos.PD(l)); 
-else
-   sol = solver_oneStepReach('x0',casos.PD(sol.x), ...
-                             'p',casos.PD(l)); 
-end
-
-l = subs(sol.x(1),t,0);
-
-
-end
-
-toc(startTic)
 
 disp(['Solver buildtime: ' num2str(buildtime), ' s'])
 
@@ -175,9 +157,8 @@ figure(1)
 pcontour(subs(sol.x(1),t,0),0,[-1 1 -1 1],'b')
 hold on 
 pcontour(g,0,[-1 1 -1 1],'k')
-% pcontour(lT,0,[-1 1 -1 1],'r')
 
-pcontour(subs(sol.x(1),t,T/2),0,[-1 1 -1 1],'g--')
+pcontour(subs(sol.x(1),t,T),0,[-1 1 -1 1],'g--')
 
 % prepare reachable set and terminal set for MPC
 V0 = subs(sol.x(1),t,0);
@@ -186,7 +167,7 @@ VT = subs(sol.x(1),t,0.1);
 h_T = subs(sol.x(2),t,0.1);
 
 Q = eye(2);
-R = 2.5;
+R = 1;
 
 W = x'*Q*x + u'*R*u;
 
@@ -234,13 +215,7 @@ buildTime_in = tic;
     solver_alpha0  = casos.sossol('S','scs',sos,opts);
 buildtime = toc(buildTime_in);
 
-% tic
-sol_alpha0 = solver_alpha0();
-% toc
-alpha0 =full(sol_alpha0.x(1))
+sol_alpha0 = solver_alpha0()
+sol_alpha0.x
 
-V0 = to_function(V0);
-V1 = to_function(VT);
-
-save('VDP_horizon5s.mat','V0',"V1","alpha0")
 

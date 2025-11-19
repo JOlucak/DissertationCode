@@ -117,10 +117,9 @@ buildTime_in = tic;
 buildtime = toc(buildTime_in);
 
 
-timeHor = 5;
+timeHor = 2;
 N = timeHor/T;
 
-startTic = tic;
 for k = 1:N
 
 if k == 1   
@@ -147,8 +146,6 @@ l = subs(sol.x(1),t,0);
 
 
 end
-
-toc(startTic)
 
 disp(['Solver buildtime: ' num2str(buildtime), ' s'])
 
@@ -186,7 +183,7 @@ VT = subs(sol.x(1),t,0.1);
 h_T = subs(sol.x(2),t,0.1);
 
 Q = eye(2);
-R = 2.5;
+R = 1;
 
 W = x'*Q*x + u'*R*u;
 
@@ -232,11 +229,11 @@ opts.Kc = struct('sos', 1);
 % build sequential solver
 buildTime_in = tic;
     solver_alpha0  = casos.sossol('S','scs',sos,opts);
-buildtime = toc(buildTime_in);
+buildtime = toc(buildTime_in)
 
-% tic
-sol_alpha0 = solver_alpha0();
-% toc
+tic
+sol_alpha0 = solver_alpha0()
+toc
 alpha0 =full(sol_alpha0.x(1))
 
 V0 = to_function(V0);
